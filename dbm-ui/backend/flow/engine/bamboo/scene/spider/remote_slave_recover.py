@@ -127,7 +127,7 @@ class TenDBRemoteSlaveRecoverFlow(object):
                 raise MasterInstanceNotExistException(
                     cluster_type=cluster_class.cluster_type, cluster_id=cluster_class.id
                 )
-            master = StorageInstance.objects.get(slave_tuple[0].ejector_id)
+            master = StorageInstance.objects.get(id=slave_tuple[0].ejector_id)
 
             db_config = get_instance_config(cluster_class.bk_cloud_id, master.machine.ip, cluster_info["ports"])
 
@@ -303,7 +303,8 @@ class TenDBRemoteSlaveRecoverFlow(object):
                     is_install_backup=False,
                 )
             )
-            surrounding_sub_pipeline_list.append(surrounding_sub_pipeline.build_sub_process(sub_name=_("新机器安装周边组件")))
+            surrounding_sub_pipeline_list.append(
+                surrounding_sub_pipeline.build_sub_process(sub_name=_("新机器安装周边组件")))
 
             re_surrounding_sub_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(self.data))
             re_surrounding_sub_pipeline.add_sub_pipeline(
@@ -363,7 +364,8 @@ class TenDBRemoteSlaveRecoverFlow(object):
                 )
             )
             uninstall_svr_sub_pipeline_list.append(
-                uninstall_svr_sub_pipeline.build_sub_process(sub_name=_("卸载remote节点{}".format(self.data["source_ip"])))
+                uninstall_svr_sub_pipeline.build_sub_process(
+                    sub_name=_("卸载remote节点{}".format(self.data["source_ip"])))
             )
 
             # 安装实例
@@ -373,13 +375,15 @@ class TenDBRemoteSlaveRecoverFlow(object):
             # 数据同步完毕 安装周边
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=surrounding_sub_pipeline_list)
             # 人工确认切换迁移实例
-            tendb_migrate_pipeline.add_act(act_name=_("人工确认切换"), act_component_code=PauseComponent.code, kwargs={})
+            tendb_migrate_pipeline.add_act(act_name=_("人工确认切换"), act_component_code=PauseComponent.code,
+                                           kwargs={})
             # 切换迁移实例
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=switch_sub_pipeline_list)
             # 实例切换完毕 安装周边
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=re_surrounding_sub_pipeline_list)
             # 卸载流程人工确认
-            tendb_migrate_pipeline.add_act(act_name=_("人工确认卸载实例"), act_component_code=PauseComponent.code, kwargs={})
+            tendb_migrate_pipeline.add_act(act_name=_("人工确认卸载实例"), act_component_code=PauseComponent.code,
+                                           kwargs={})
             # 卸载remote节点
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=uninstall_svr_sub_pipeline_list)
             tendb_migrate_pipeline_all_list.append(
