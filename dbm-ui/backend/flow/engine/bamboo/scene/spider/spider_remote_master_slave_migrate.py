@@ -455,10 +455,8 @@ class TendbClusterMigrateRemoteFlow(object):
                     uninstall_svr_sub_pipeline.build_sub_process(sub_name=_("卸载remote节点{}").format(ip))
                 )
 
-            # 安装实例
+            # ==== 主流程顺序控制 =====
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=install_sub_pipeline_list)
-            # 数据同步
-            tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=sync_data_sub_pipeline_list)
             if self.data["need_checksum"]:
                 tendb_migrate_pipeline.add_act(
                     act_name=_("生成checksum单据"),
@@ -472,6 +470,8 @@ class TendbClusterMigrateRemoteFlow(object):
                         )
                     ),
                 )
+            # 数据同步
+            tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=sync_data_sub_pipeline_list)
 
             # 数据同步完毕 安装周边
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=surrounding_sub_pipeline_list)

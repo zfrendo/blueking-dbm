@@ -398,7 +398,8 @@ class TenDBRemoteRebalanceFlow(object):
                 uninstall_svr_sub_pipeline_list.append(
                     uninstall_svr_sub_pipeline.build_sub_process(sub_name=_("卸载remote节点{}".format(ip)))
                 )
-            # 安装实例
+
+            # ==== 主流程顺序控制 =====
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=install_sub_pipeline_list)
             tendb_migrate_pipeline.add_act(
                 act_name=_("屏蔽告警24小时"),
@@ -415,8 +416,6 @@ class TenDBRemoteRebalanceFlow(object):
                     ],
                 },
             )
-            # 数据同步
-            tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=sync_data_sub_pipeline_list)
             if self.data["need_checksum"]:
                 tendb_migrate_pipeline.add_act(
                     act_name=_("生成checksum单据"),
@@ -430,6 +429,9 @@ class TenDBRemoteRebalanceFlow(object):
                         )
                     ),
                 )
+            # 数据同步
+            tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=sync_data_sub_pipeline_list)
+
             # 切换前安装周边
             tendb_migrate_pipeline.add_sub_pipeline(
                 sub_flow=standardize_mysql_cluster_subflow(

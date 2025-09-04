@@ -324,6 +324,21 @@ class MySQLMigrateClusterRemoteFlow(object):
                     # 从standby从库找备份
                     filter_ips = [master_model.machine.ip]
                     filter_ips.extend([slave.machine.ip for slave in stand_by_slaves])
+
+                if self.data["need_checksum"]:
+                    sync_data_sub_pipeline.add_act(
+                        act_name=_("生成checksum单据"),
+                        act_component_code=MySQLCheckSumTicketComponent.code,
+                        kwargs=asdict(
+                            MysqlCheckSumKwargs(
+                                uid=self.data["uid"],
+                                bk_biz_id=cluster_model.bk_biz_id,
+                                created_by=self.data["created_by"],
+                                checksum_info=copy.deepcopy(checksum_info),
+                            )
+                        ),
+                    )
+
                 sync_data_sub_pipeline.add_sub_pipeline(
                     sub_flow=mysql_restore_master_slave_sub_flow(
                         root_id=self.root_id,
@@ -346,19 +361,6 @@ class MySQLMigrateClusterRemoteFlow(object):
                     ),
                 )
 
-                if self.data["need_checksum"]:
-                    sync_data_sub_pipeline.add_act(
-                        act_name=_("生成checksum单据"),
-                        act_component_code=MySQLCheckSumTicketComponent.code,
-                        kwargs=asdict(
-                            MysqlCheckSumKwargs(
-                                uid=self.data["uid"],
-                                bk_biz_id=cluster_model.bk_biz_id,
-                                created_by=self.data["created_by"],
-                                checksum_info=copy.deepcopy(checksum_info),
-                            )
-                        ),
-                    )
                 sync_data_sub_pipeline_list.append(
                     sync_data_sub_pipeline.build_sub_process(sub_name=_("{} 集群恢复数据".format(cluster_model.name)))
                 )
@@ -505,10 +507,10 @@ class MySQLMigrateClusterRemoteFlow(object):
                 uninstall_svr_sub_pipeline_list.append(
                     uninstall_svr_sub_pipeline.build_sub_process(sub_name=_("卸载remote节点{}".format(ip)))
                 )
-            # 安装实例
+
+            # ==== 主流程顺序控制 =====
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=install_sub_pipeline_list)
-            # 同步配置
-            # tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=sync_mycnf_sub_pipeline_list)
+            # chekcsum
             # 数据同步
             tendb_migrate_pipeline.add_parallel_sub_pipeline(sub_flow_list=sync_data_sub_pipeline_list)
             # 新机器安装周边组件
