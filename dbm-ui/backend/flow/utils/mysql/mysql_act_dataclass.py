@@ -425,6 +425,13 @@ class ExecuteRdsKwargs:
     instance_port: int
     sqls: list = field(default_factory=list)
 
+@dataclass()
+class ExecuteRdsCompareKwargs(ExecuteRdsKwargs):
+    """
+    定义MySQL参数对比
+    """
+    dst_instance_ip: str = ""
+    dst_instance_port: int = 0
 
 @dataclass
 class CheckProcesslistKwargs(ExecuteRdsKwargs):
