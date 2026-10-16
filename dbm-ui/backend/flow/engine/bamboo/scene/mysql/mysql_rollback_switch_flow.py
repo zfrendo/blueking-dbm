@@ -15,24 +15,18 @@ from typing import Dict, Optional
 
 from django.utils.translation import gettext as _
 
-from backend.configuration.constants import DBType
 from backend.db_meta.enums import InstanceInnerRole
 from backend.db_meta.models import Cluster
-from backend.flow.consts import LONG_JOB_TIMEOUT, TruncateDataTypeEnum
 from backend.flow.engine.bamboo.scene.common.builder import Builder, SubBuilder
-from backend.flow.engine.bamboo.scene.common.get_file_list import GetFileList
-from backend.flow.plugins.components.collections.mysql.exec_actuator_script import ExecuteDBActuatorScriptComponent
-from backend.flow.plugins.components.collections.mysql.filter_database_table_by_flashback_input import (
-    FilterDatabaseTableFromFlashbackInputComponent,
-)
-from backend.flow.plugins.components.collections.mysql.general_check_db_in_using import GeneralCheckDBInUsingComponent
-from backend.flow.plugins.components.collections.mysql.mysql_check_processlist import MySQLCheckProcesslistComponent
+from backend.flow.engine.bamboo.scene.mysql.clone_grants_from_file import mysql_clone_grants_from_file_subflow
+from backend.flow.plugins.components.collections.mysql.clone_proxy_client_in_backend import \
+    CloneProxyUsersInBackendComponent
+from backend.flow.plugins.components.collections.mysql.clone_proxy_user_in_cluster import \
+    CloneProxyUsersInClusterComponent
 from backend.flow.plugins.components.collections.mysql.mysql_rollback_check_config import \
     MySQLRollbackCheckConfigComponent
-from backend.flow.plugins.components.collections.mysql.trans_flies import TransFileComponent
-from backend.flow.utils.mysql.mysql_act_dataclass import BKCloudIdKwargs, DownloadMediaKwargs, ExecActuatorKwargs, \
-    ExecuteRdsCompareKwargs
-from backend.flow.utils.mysql.mysql_act_playload import MysqlActPayload
+from backend.flow.utils.mysql.mysql_act_dataclass import ExecuteRdsCompareKwargs, CloneProxyUsersKwargs, \
+    CloneProxyClientInBackendKwargs
 from backend.flow.utils.mysql.mysql_context_dataclass import MySQLFlashBackContext
 
 logger = logging.getLogger("flow")
@@ -75,30 +69,33 @@ class MysqlRollbackSwitchFlow(object):
 
             src_master = src_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
             dst_master = dst_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
-            # src_is_standby_slave = src_cluster.storageinstance_set.filter(
-            #     instance_inner_role=InstanceInnerRole.SLAVE.value, is_stand_by=True
-            # )
+            src_is_standby_slave = src_cluster.storageinstance_set.get(
+                instance_inner_role=InstanceInnerRole.SLAVE.value, is_stand_by=True
+            )
+            dst_is_standby_slave = dst_cluster.storageinstance_set.get(
+                instance_inner_role=InstanceInnerRole.SLAVE.value, is_stand_by=True
+            )
             # src_slaves = src_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
             # dst_slaves = dst_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
             all_dst_instances = dst_cluster.storageinstance_set.all()
+            src_proxys = src_cluster.proxyinstance_set.all()
+            dst_proxys = dst_cluster.proxyinstance_set.all()
 
-            master = src_master
             ticket_data = {
-                **copy.deepcopy(info),
+                # **copy.deepcopy(info),
                 "cluster_id": src_cluster.id,
                 "uid": self.data["uid"],
                 "created_by": self.data["created_by"],
                 "bk_biz_id": src_cluster.bk_biz_id,
                 "module": src_cluster.db_module_id,
                 "db_module_id": src_cluster.db_module_id,
-                "ip": master.machine.ip,
-                "port": master.port,
+                # "ip": master.machine.ip,
+                # "port": master.port,
                 "ticket_type": self.data["ticket_type"],
-                "truncate_data_type": TruncateDataTypeEnum.TRUNCATE_TABLE.value,  # 不是真的要删表, 只是复用打开检查必须
             }
             sub_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(ticket_data))
 
-            # 检查配置项: 以源集群 master 为基准，并发对比所有节点
+            # 步骤1 检查配置项: 以源集群 master 为基准，并发对比所有节点 todo 是否要区分
             check_config_acts = []
             for node in all_dst_instances:
                 check_config_acts.append(
@@ -118,57 +115,65 @@ class MysqlRollbackSwitchFlow(object):
                 )
             sub_pipeline.add_parallel_acts(acts_list=check_config_acts)
 
-            # 复制proxy权限
-
-
-
-
-
-            sub_pipeline.add_act(
-                act_name=_("获取回档库表"),
-                act_component_code=FilterDatabaseTableFromFlashbackInputComponent.code,
-                kwargs=asdict(BKCloudIdKwargs(bk_cloud_id=src_cluster.bk_cloud_id)),
+            # 步骤2 复制权限
+            #  存储节点 is_stand_by 主从对复制权限
+            sub_pipeline.add_parallel_sub_pipeline(
+                sub_flow_list=[
+                    mysql_clone_grants_from_file_subflow(
+                        root_id=self.root_id,
+                        data=copy.deepcopy(ticket_data),
+                        bk_cloud_id=src_cluster.bk_cloud_id,
+                        bk_biz_id=src_cluster.bk_biz_id,
+                        source_address=src_master.ip_port,
+                        dest_addresses=[dst_master.ip_port]),
+                    mysql_clone_grants_from_file_subflow(
+                        root_id=self.root_id,
+                        data=copy.deepcopy(ticket_data),
+                        bk_cloud_id=src_cluster.bk_cloud_id,
+                        bk_biz_id=src_cluster.bk_biz_id,
+                        source_address=src_is_standby_slave.ip_port,
+                        dest_addresses=[
+                            dst_is_standby_slave.ip_port],
+                    ),
+                ]
             )
+            #  todo 其他非 is_standby_by 节点怎么找对应关系呢？
 
-            if not self.data["force"]:
-                sub_pipeline.add_act(
-                    act_name=_("检查库表是否在用"),
-                    act_component_code=GeneralCheckDBInUsingComponent.code,
-                    kwargs=asdict(BKCloudIdKwargs(bk_cloud_id=src_cluster.bk_cloud_id)),
+            # 从集群内已有 proxy 克隆用户白名单到新 proxy
+            clone_user_acts_list = []
+            add_proxy_user_acts_list = []
+            for dst_proxy in dst_proxys:
+                #  proxy 克隆报名单
+                clone_user_acts_list.append(
+                    {
+                        "act_name": _("克隆proxy用户白名单[{}:{}]".format(dst_proxy.machine.ip, dst_proxy.port)),
+                        "act_component_code": CloneProxyUsersInClusterComponent.code,
+                        "kwargs": asdict(
+                            CloneProxyUsersKwargs(
+                                cluster_id=src_cluster.id,
+                                target_proxy_host=dst_proxy.machine.ip,
+                            )
+                        ),
+                    }
+                )
+                #  todo 在后端 MySQL 上为新 proxy 的 IP 创建访问权限 确定是否可跨集群 。需要考虑从所有src_proxy复制吗？
+                add_proxy_user_acts_list.append(
+                    {
+                        "act_name": _("集群对新的proxy添加权限[{}:{}]".format(dst_proxy.machine.ip, dst_proxy.port)),
+                        "act_component_code": CloneProxyUsersInBackendComponent.code,
+                        "kwargs": asdict(
+                            CloneProxyClientInBackendKwargs(
+                                cluster_id=dst_cluster.id,
+                                target_proxy_host=dst_proxy.machine.ip,
+                                origin_proxy_host=src_proxys[0].machine.ip,
+                            )
+                        ),
+                    }
                 )
 
-            sub_pipeline.add_act(
-                act_name=_("下发db-actor到集群主节点{}").format(master.machine.ip),
-                act_component_code=TransFileComponent.code,
-                kwargs=asdict(
-                    DownloadMediaKwargs(
-                        bk_cloud_id=src_cluster.bk_cloud_id,
-                        exec_ip=master.machine.ip,
-                        file_list=GetFileList(db_type=DBType.MySQL).get_db_actuator_package(),
-                    )
-                ),
-            )
-
-            cluster = {
-                **copy.deepcopy(info),
-                "master_port": master.port,
-                "work_dir": f"/data/dbbak/{self.root_id}",
-            }
-            sub_pipeline.add_act(
-                act_name=_("flashback启动恢复数据中{}").format(master.machine.ip),
-                act_component_code=ExecuteDBActuatorScriptComponent.code,
-                kwargs=asdict(
-                    ExecActuatorKwargs(
-                        job_timeout=LONG_JOB_TIMEOUT,
-                        exec_ip=master.machine.ip,
-                        bk_cloud_id=src_cluster.bk_cloud_id,
-                        cluster=cluster,
-                        get_mysql_payload_func=MysqlActPayload.get_mysql_flashback_payload.__name__,
-                    )
-                ),
-            )
-            sub_pipeline_list.append(sub_pipeline.build_sub_process(sub_name=_("flash开始恢复数据")))
-
+            #  步骤3 域名互切、包括clb域名、proxy 域名。从库域名，todo 如何对应
+            # src_cluster.clusterentry_set.get(entry_type=ClusterEntryType.DNS.value).entry_value
+            sub_pipeline_list.append(sub_pipeline.build_sub_process(sub_name=_("新机回档集群间互切")))
         mysql_rollback_switch_pipeline.add_parallel_sub_pipeline(sub_flow_list=sub_pipeline_list)
         mysql_rollback_switch_pipeline.run_pipeline(
             init_trans_data_class=MySQLFlashBackContext(), is_drop_random_user=True
