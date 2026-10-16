@@ -20,7 +20,6 @@ from backend.flow.plugins.components.collections.mysql.check_client_connections 
 from backend.flow.engine.bamboo.scene.mysql.common.get_master_config import get_instance_config
 
 
-
 class MySQLRollbackCheckConfigService(BaseService):
     """
     检查2个实例的配置信息
@@ -34,121 +33,43 @@ class MySQLRollbackCheckConfigService(BaseService):
         dst_instance = "{}{}{}".format(kwargs["dst_instance_ip"], IP_PORT_DIVIDER, kwargs["dst_instance_port"])
         bk_cloud_id = kwargs["bk_cloud_id"]
 
-        src_instance_config=get_instance_config(bk_cloud_id,kwargs["instance_ip"],[kwargs["instance_port"]])[kwargs["instance_port"]]
-        dst_instance_config=get_instance_config(bk_cloud_id,kwargs["dst_instance_ip"],[kwargs["dst_instance_port"]])[kwargs["dst_instance_port"]]
-        _format_process_infos
-        #
-
-
-
-        rpc_info = {
-            "addresses": [src_instance],
-            "cmds": [
-                """select * from information_schema.processlist  where
-User not in ('event_scheduler', 'system user','yw', 'MONITOR', 'ADMIN','repl')
-and User!=SUBSTRING_INDEX(current_user(),'@',1)"""
-            ],
-            "force": False,
-            "bk_cloud_id": kwargs["bk_cloud_id"],
-        }
-        self.log_info(
-            _(
-                """
-    检查slave当前30秒内是否检测到有链接,步骤:
-    1. 检查 show processlist 进程。
-    2. 先 stop slave ,避免复制进程打开表
-    3. flush tables
-    4. 检查 show open tables
-    5. 程序退出前 start slave。
-        """
+        self.log_info("source instance: {}".format(src_instance))
+        self.log_info("destination instance: {}".format(dst_instance))
+        src_instance_config = get_instance_config(
+            bk_cloud_id, kwargs["instance_ip"], [kwargs["instance_port"]]
+        )[str(kwargs["instance_port"])]
+        dst_instance_config = get_instance_config(
+            bk_cloud_id, kwargs["dst_instance_ip"], [kwargs["dst_instance_port"]]
+        )[str(kwargs["dst_instance_port"])]
+        # 对比源实例与目标实例的配置参数
+        compare_result = []
+        check_result = True
+        all_variable_names = set(src_instance_config.keys()) | set(dst_instance_config.keys())
+        for variable_name in sorted(all_variable_names):
+            src_value = src_instance_config.get(variable_name)
+            dst_value = dst_instance_config.get(variable_name)
+            is_equal = src_value == dst_value
+            if not is_equal:
+                check_result = False
+            compare_result.append(
+                {
+                    "Variable_name": variable_name,
+                    "src_instance_value": src_value,
+                    "dst_instance_value": dst_value,
+                    "result": "yes" if is_equal else "no",
+                }
             )
-        )
-        check_slave_flag = False
-        try:
-            self.log_info(rpc_info["cmds"][0])
-            res = DRSApi.rpc(rpc_info)
-            if res[0]["error_msg"]:
-                self.log_info("execute sql error {}".format(res[0]["error_msg"]))
-                return False
-            else:
-                if res[0]["cmd_results"][0]["table_data"] is None or len(res[0]["cmd_results"][0]["table_data"]) == 0:
-                    if kwargs.get("only_show_processlist", False):
-                        return True
-                    #  flush tables 前先 stop slave
-                    rpc_info["cmds"] = ["show slave status"]
-                    self.log_info(rpc_info["cmds"][0])
-                    res = DRSApi.rpc_mysql_replica_compat(rpc_info)
-                    if res[0]["error_msg"]:
-                        self.log_info("execute sql error {}".format(res[0]["error_msg"]))
-                        return False
-                    # 说明是从节点
-                    if (
-                        res[0]["cmd_results"][0]["table_data"] is not None
-                        and len(res[0]["cmd_results"][0]["table_data"]) > 0
-                    ):
-                        self.log_info(rpc_info["cmds"][0])
-                        check_slave_flag = True
-                        rpc_info["cmds"] = ["stop slave"]
-                        res = DRSApi.rpc_mysql_replica_compat(rpc_info)
-                        if res[0]["error_msg"]:
-                            self.log_info("execute sql error {}".format(res[0]["error_msg"]))
-                            return False
-                        time.sleep(10)
-
-                    rpc_info["cmds"] = ["flush tables"]
-                    self.log_info(rpc_info["cmds"][0])
-                    res = DRSApi.rpc(rpc_info)
-                    if res[0]["error_msg"]:
-                        self.log_info("execute sql error {}".format(res[0]["error_msg"]))
-                        return False
-                    time.sleep(31)
-                    rpc_info["cmds"] = [
-                        """show open tables where `Database`  not in ('mysql', 'sys', 'information_schema',
-    'performance_schema', 'test', 'infodba_schema', 'db_infobase')"""
-                    ]
-                    self.log_info(rpc_info["cmds"][0])
-                    res = DRSApi.rpc(rpc_info)
-                    if res[0]["error_msg"]:
-                        self.log_info("execute sql error {}".format(res[0]["error_msg"]))
-                        return False
-                    if (
-                        res[0]["cmd_results"][0]["table_data"] is None
-                        or len(res[0]["cmd_results"][0]["table_data"]) == 0
-                    ):
-                        return True
-                    else:
-                        self.log_error(
-                            _("实例: {},存在open table {}".format(instance, res[0]["cmd_results"][0]["table_data"]))
-                        )
-                        return False
-
-                else:
-                    infos = res[0]["cmd_results"][0]["table_data"]
-                    self.log_error(_("实例: {},存在 {} 个链接".format(instance, len(infos))))
-                    if len(infos) < 1:
-                        return False
-                    process_infos = []
-                    temp = {"check_address": res[0]["address"]}
-                    for i in infos:
-                        process_infos.append({**temp, **i})
-                    if len(process_infos) > 0:
-                        formatted = _format_process_infos(process_infos, info_max_len=120)
-                        if formatted:
-                            self.log_error(formatted)
-                    return False
-        finally:
-            if check_slave_flag:
-                rpc_info["cmds"] = ["start slave"]
-                self.log_info(rpc_info["cmds"][0])
-                res = DRSApi.rpc_mysql_replica_compat(rpc_info)
-                if res[0]["error_msg"]:
-                    self.log_info("execute sql error {}".format(res[0]["error_msg"]))
-                    self.log_info(_("检查不通过,且重新 start slave 失败,请手动介入处理"))
-                    return False
-            self.log_info("check finish")
-
+        formatted = _format_process_infos(compare_result, info_max_len=120)
+        self.log_info(formatted)
+        # if formatted:
+        #     self.log_error(formatted)
+        if not check_result:
+            self.log_warning(_("源实例与目标实例存在配置差异,请根据实际需求选择是否跳过此节点"))
+            return False
+        else:
+            return True
 
 class MySQLRollbackCheckConfigComponent(Component):
     name = __name__
     code = "mysql_rollback_check_config"
-    bound_service = MySQLCheckConfigService
+    bound_service = MySQLRollbackCheckConfigService
