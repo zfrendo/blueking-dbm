@@ -26,8 +26,12 @@ from backend.flow.plugins.components.collections.mysql.filter_database_table_by_
     FilterDatabaseTableFromFlashbackInputComponent,
 )
 from backend.flow.plugins.components.collections.mysql.general_check_db_in_using import GeneralCheckDBInUsingComponent
+from backend.flow.plugins.components.collections.mysql.mysql_check_processlist import MySQLCheckProcesslistComponent
+from backend.flow.plugins.components.collections.mysql.mysql_rollback_check_config import \
+    MySQLRollbackCheckConfigComponent
 from backend.flow.plugins.components.collections.mysql.trans_flies import TransFileComponent
-from backend.flow.utils.mysql.mysql_act_dataclass import BKCloudIdKwargs, DownloadMediaKwargs, ExecActuatorKwargs
+from backend.flow.utils.mysql.mysql_act_dataclass import BKCloudIdKwargs, DownloadMediaKwargs, ExecActuatorKwargs, \
+    ExecuteRdsCompareKwargs
 from backend.flow.utils.mysql.mysql_act_playload import MysqlActPayload
 from backend.flow.utils.mysql.mysql_context_dataclass import MySQLFlashBackContext
 
@@ -69,6 +73,41 @@ class MysqlRollbackSwitchFlow(object):
             src_cluster = Cluster.objects.get(id=info["source_cluster_id"])
             dst_cluster = Cluster.objects.get(id=info["destination_cluster_id"])
 
+            ticket_data = {
+                **copy.deepcopy(info),
+                "cluster_id": src_cluster.id,
+                "uid": self.data["uid"],
+                "created_by": self.data["created_by"],
+                "bk_biz_id": src_cluster.bk_biz_id,
+                "module": src_cluster.db_module_id,
+                "db_module_id": src_cluster.db_module_id,
+                "ticket_type": self.data["ticket_type"],
+            }
+            sub_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(ticket_data))
+
+
+            src_master = src_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
+            dst_master = dst_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
+            src_is_standby_slave = src_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value,is_stand_by=True)
+            # src_slaves = src_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
+            dst_slaves = dst_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
+
+
+            check_connect_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(self.data))
+            check_connect_pipeline.add_act(
+                act_name=_("检查配置 {}").format(src_master.ip_port),
+                act_component_code=MySQLRollbackCheckConfigComponent.code,
+                kwargs=asdict(
+                    ExecuteRdsCompareKwargs(
+                        bk_cloud_id=src_cluster.bk_cloud_id,
+                        instance_ip=src_master.machine.ip,
+                        instance_port=src_master.port,
+                        dst_instance_ip=dst_master.machine.ip,
+                        dst_instance_port=dst_master.port
+
+                    )
+                ),
+            )
             #  检查版本，检查配置项
 
             master = src_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
