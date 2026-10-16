@@ -55,7 +55,7 @@ class MysqlRollbackSwitchFlow(object):
         """
         mysql_rollback_switch_flow 集群域名互切
         tendbHa集群间切换：
-        1、检查配置项，检查版本
+        1、检查配置项
         2、proxy权限复制
         3、后端db dr权限复制
         4、切换proxy节点映射的域名、切换从节点映射的域名
@@ -73,44 +73,16 @@ class MysqlRollbackSwitchFlow(object):
             src_cluster = Cluster.objects.get(id=info["source_cluster_id"])
             dst_cluster = Cluster.objects.get(id=info["destination_cluster_id"])
 
-            ticket_data = {
-                **copy.deepcopy(info),
-                "cluster_id": src_cluster.id,
-                "uid": self.data["uid"],
-                "created_by": self.data["created_by"],
-                "bk_biz_id": src_cluster.bk_biz_id,
-                "module": src_cluster.db_module_id,
-                "db_module_id": src_cluster.db_module_id,
-                "ticket_type": self.data["ticket_type"],
-            }
-            sub_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(ticket_data))
-
-
             src_master = src_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
             dst_master = dst_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
-            src_is_standby_slave = src_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value,is_stand_by=True)
+            # src_is_standby_slave = src_cluster.storageinstance_set.filter(
+            #     instance_inner_role=InstanceInnerRole.SLAVE.value, is_stand_by=True
+            # )
             # src_slaves = src_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
-            dst_slaves = dst_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
+            # dst_slaves = dst_cluster.storageinstance_set.filter(instance_inner_role=InstanceInnerRole.SLAVE.value)
+            all_dst_instances = dst_cluster.storageinstance_set.all()
 
-
-            check_connect_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(self.data))
-            check_connect_pipeline.add_act(
-                act_name=_("检查配置 {}").format(src_master.ip_port),
-                act_component_code=MySQLRollbackCheckConfigComponent.code,
-                kwargs=asdict(
-                    ExecuteRdsCompareKwargs(
-                        bk_cloud_id=src_cluster.bk_cloud_id,
-                        instance_ip=src_master.machine.ip,
-                        instance_port=src_master.port,
-                        dst_instance_ip=dst_master.machine.ip,
-                        dst_instance_port=dst_master.port
-
-                    )
-                ),
-            )
-            #  检查版本，检查配置项
-
-            master = src_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.MASTER.value)
+            master = src_master
             ticket_data = {
                 **copy.deepcopy(info),
                 "cluster_id": src_cluster.id,
@@ -125,6 +97,32 @@ class MysqlRollbackSwitchFlow(object):
                 "truncate_data_type": TruncateDataTypeEnum.TRUNCATE_TABLE.value,  # 不是真的要删表, 只是复用打开检查必须
             }
             sub_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(ticket_data))
+
+            # 检查配置项: 以源集群 master 为基准，并发对比所有节点
+            check_config_acts = []
+            for node in all_dst_instances:
+                check_config_acts.append(
+                    {
+                        "act_name": _("检查配置 {} vs {}").format(src_master.ip_port, node.ip_port),
+                        "act_component_code": MySQLRollbackCheckConfigComponent.code,
+                        "kwargs": asdict(
+                            ExecuteRdsCompareKwargs(
+                                bk_cloud_id=src_cluster.bk_cloud_id,
+                                instance_ip=src_master.machine.ip,
+                                instance_port=src_master.port,
+                                dst_instance_ip=node.machine.ip,
+                                dst_instance_port=node.port,
+                            )
+                        ),
+                    }
+                )
+            sub_pipeline.add_parallel_acts(acts_list=check_config_acts)
+
+            # 复制proxy权限
+
+
+
+
 
             sub_pipeline.add_act(
                 act_name=_("获取回档库表"),
