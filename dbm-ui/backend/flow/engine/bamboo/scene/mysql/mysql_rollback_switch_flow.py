@@ -19,14 +19,21 @@ from backend.db_meta.enums import InstanceInnerRole
 from backend.db_meta.models import Cluster
 from backend.flow.engine.bamboo.scene.common.builder import Builder, SubBuilder
 from backend.flow.engine.bamboo.scene.mysql.clone_grants_from_file import mysql_clone_grants_from_file_subflow
-from backend.flow.plugins.components.collections.mysql.clone_proxy_client_in_backend import \
-    CloneProxyUsersInBackendComponent
-from backend.flow.plugins.components.collections.mysql.clone_proxy_user_in_cluster import \
-    CloneProxyUsersInClusterComponent
-from backend.flow.plugins.components.collections.mysql.mysql_rollback_check_config import \
-    MySQLRollbackCheckConfigComponent
-from backend.flow.utils.mysql.mysql_act_dataclass import ExecuteRdsCompareKwargs, CloneProxyUsersKwargs, \
-    CloneProxyClientInBackendKwargs
+from backend.flow.engine.bamboo.scene.mysql.common.rollback_domain_exchange import rollback_clb_exchange_subflow
+from backend.flow.plugins.components.collections.mysql.clone_proxy_client_in_backend import (
+    CloneProxyUsersInBackendComponent,
+)
+from backend.flow.plugins.components.collections.mysql.clone_proxy_user_in_cluster import (
+    CloneProxyUsersInClusterComponent,
+)
+from backend.flow.plugins.components.collections.mysql.mysql_rollback_check_config import (
+    MySQLRollbackCheckConfigComponent,
+)
+from backend.flow.utils.mysql.mysql_act_dataclass import (
+    CloneProxyClientInBackendKwargs,
+    CloneProxyUsersKwargs,
+    ExecuteRdsCompareKwargs,
+)
 from backend.flow.utils.mysql.mysql_context_dataclass import MySQLFlashBackContext
 
 logger = logging.getLogger("flow")
@@ -87,6 +94,7 @@ class MysqlRollbackSwitchFlow(object):
                 "uid": self.data["uid"],
                 "created_by": self.data["created_by"],
                 "bk_biz_id": src_cluster.bk_biz_id,
+                "bk_cloud_id": src_cluster.bk_cloud_id,
                 "module": src_cluster.db_module_id,
                 "db_module_id": src_cluster.db_module_id,
                 # "ip": master.machine.ip,
@@ -95,7 +103,7 @@ class MysqlRollbackSwitchFlow(object):
             }
             sub_pipeline = SubBuilder(root_id=self.root_id, data=copy.deepcopy(ticket_data))
 
-            # 步骤1 检查配置项: 以源集群 master 为基准，并发对比所有节点 todo 是否要区分
+            # 步骤1 检查配置项: 以源集群 master 为基准，并发对比所有节点 todo 是否要区分 是否可以不检查？
             check_config_acts = []
             for node in all_dst_instances:
                 check_config_acts.append(
@@ -125,15 +133,15 @@ class MysqlRollbackSwitchFlow(object):
                         bk_cloud_id=src_cluster.bk_cloud_id,
                         bk_biz_id=src_cluster.bk_biz_id,
                         source_address=src_master.ip_port,
-                        dest_addresses=[dst_master.ip_port]),
+                        dest_addresses=[dst_master.ip_port],
+                    ),
                     mysql_clone_grants_from_file_subflow(
                         root_id=self.root_id,
                         data=copy.deepcopy(ticket_data),
                         bk_cloud_id=src_cluster.bk_cloud_id,
                         bk_biz_id=src_cluster.bk_biz_id,
                         source_address=src_is_standby_slave.ip_port,
-                        dest_addresses=[
-                            dst_is_standby_slave.ip_port],
+                        dest_addresses=[dst_is_standby_slave.ip_port],
                     ),
                 ]
             )
@@ -171,7 +179,24 @@ class MysqlRollbackSwitchFlow(object):
                     }
                 )
 
-            #  步骤3 域名互切、包括clb域名、proxy 域名。从库域名，todo 如何对应
+            #  步骤3 域名互切、包括clb域名、proxy 域名。从库域名
+
+            exchange_clb_subflow = rollback_clb_exchange_subflow(
+                root_id=self.root_id,
+                ticket_data=copy.deepcopy(ticket_data),
+                src_cluster=src_cluster,
+                dst_cluster=dst_cluster,
+            )
+            if exchange_clb_subflow is not None:
+                sub_pipeline.add_sub_pipeline(sub_flow=exchange_clb_subflow)
+
+            #  修改元数据
+
+            # 从节点域名指向 todo
+            #  tendbHa 只有主节点可绑定clb
+            # tendbCluster spider master 和slave可绑定clb
+            # 现在是根据数据类型查询绑定关系
+
             # src_cluster.clusterentry_set.get(entry_type=ClusterEntryType.DNS.value).entry_value
             sub_pipeline_list.append(sub_pipeline.build_sub_process(sub_name=_("新机回档集群间互切")))
         mysql_rollback_switch_pipeline.add_parallel_sub_pipeline(sub_flow_list=sub_pipeline_list)
