@@ -12,7 +12,13 @@ import logging.config
 
 from django.utils.translation import gettext as _
 
-from backend.db_meta.enums import ClusterEntryRole, ClusterEntryType, ClusterType, TenDBClusterSpiderRole
+from backend.db_meta.enums import (
+    ClusterEntryRole,
+    ClusterEntryType,
+    ClusterType,
+    InstanceInnerRole,
+    TenDBClusterSpiderRole,
+)
 from backend.db_meta.models import Cluster, ClusterEntry
 from backend.flow.consts import DnsOpType
 from backend.flow.engine.bamboo.scene.common.builder import SubBuilder
@@ -25,64 +31,325 @@ from backend.flow.plugins.components.collections.name_service.mysql_clb_comp imp
 logger = logging.getLogger("flow")
 
 
-def rollback_domain_exchange_subflow(
-    root_id: str,
-    ticket_data: dict,
-    bk_cloud_id: int,
-    src_domain: str,
-    dst_domain: str,
-    src_ips: list[str],
-    dst_ips: list[str],
-    port: int,
-):
+def rollback_domain_exchange_subflow(root_id: str, ticket_data: dict, src_cluster: Cluster, dst_cluster: Cluster):
     """
-    定义域名互换的子流程
+    定义域名互换的子流程 先删除域名再添加域名
     @param root_id: root id
     @param ticket_data: 单据数据
-    @param bk_cloud_id: 云区域ID
-    @param src_domain: 源域名
-    @param dst_domain: 目标域名
-    @param src_ips: 源IP列表
-    @param dst_ips: 目标IP列表
+    @param src_cluster: 源集群
+    @param dst_cluster: 目标集群
     """
-    # 针对集群维度声明子流程
     exchange_sub_pipeline = SubBuilder(root_id=root_id, data=copy.deepcopy(ticket_data))
-    #  先删除双方域名
-    domain_del_list = [
-        BuildDNSManageSubflow(
-            root_id,
-            ticket_data,
-            DnsOpType.RECYCLE_RECORD,
-            {"bk_cloud_id": bk_cloud_id, "port": port, "del_ips": src_ips},
-        ),
-        BuildDNSManageSubflow(
-            root_id,
-            ticket_data,
-            DnsOpType.RECYCLE_RECORD,
-            {"bk_cloud_id": bk_cloud_id, "port": port, "del_ips": dst_ips},
-        ),
-    ]
-    # 并行删除域名子流程
-    exchange_sub_pipeline.add_parallel_acts(acts_list=domain_del_list)
+    #  查询从节点域名
+    if src_cluster.cluster_type == ClusterType.TENDBCLUSTER.value:
+        src_master_entry = src_cluster.clusterentry_set.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.MASTER_ENTRY.value
+        )
+        dst_master_entry = dst_cluster.clusterentry_set.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.MASTER_ENTRY.value
+        )
+        src_master_spiders = src_cluster.proxyinstance_set.filter(
+            tendbclusterspiderext__spider_role=TenDBClusterSpiderRole.SPIDER_MASTER
+        )
+        dst_master_spiders = dst_cluster.proxyinstance_set.filter(
+            tendbclusterspiderext__spider_role=TenDBClusterSpiderRole.SPIDER_MASTER
+        )
+        src_master_spiders_ips = [spider.machine.ip for spider in src_master_spiders]
+        dst_master_spiders_ips = [spider.machine.ip for spider in dst_master_spiders]
+        src_slave_entrys = src_cluster.clusterentry_set.filter(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.SLAVE_ENTRY.value
+        )
+        dst_slave_entrys = dst_cluster.clusterentry_set.filter(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.SLAVE_ENTRY.value
+        )
+        src_slave_spiders = src_cluster.proxyinstance_set.filter(
+            tendbclusterspiderext__spider_role=TenDBClusterSpiderRole.SPIDER_SLAVE
+        )
+        dst_slave_spiders = dst_cluster.proxyinstance_set.filter(
+            tendbclusterspiderext__spider_role=TenDBClusterSpiderRole.SPIDER_SLAVE
+        )
+        src_slave_spiders_ips = [spider.machine.ip for spider in src_slave_spiders]
+        dst_slave_spiders_ips = [spider.machine.ip for spider in dst_slave_spiders]
+        domain_del_list = [
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_master_spiders[0].port,
+                    "del_ips": src_master_spiders_ips,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_master_spiders[0].port,
+                    "del_ips": dst_master_spiders_ips,
+                },
+            ),
+        ]
 
-    # 互换添加域名
-    domain_add_list = [
-        BuildDNSManageSubflow(
-            root_id,
-            ticket_data,
-            DnsOpType.CREATE,
-            {"bk_cloud_id": bk_cloud_id, "port": port, "add_ips": src_ips, "entry": dst_domain},
-        ),
-        BuildDNSManageSubflow(
-            root_id,
-            ticket_data,
-            DnsOpType.CREATE,
-            {"bk_cloud_id": bk_cloud_id, "port": port, "add_ips": dst_ips, "entry": src_domain},
-        ),
-    ]
-    # 并行添加域名子流程
-    exchange_sub_pipeline.add_parallel_acts(acts_list=domain_add_list)
+        domain_add_list = [
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_master_spiders[0].port,
+                    "add_ips": src_master_spiders_ips,
+                    "entry": dst_master_entry.entry,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_master_spiders[0].port,
+                    "add_ips": dst_master_spiders_ips,
+                    "entry": src_master_entry.entry,
+                },
+            ),
+        ]
 
+        if len(src_slave_entrys) == 1:
+
+            if len(src_slave_spiders) > 0:
+                #  先删除双方域名
+                domain_del_list.append(
+                    BuildDNSManageSubflow(
+                        root_id,
+                        ticket_data,
+                        DnsOpType.RECYCLE_RECORD,
+                        {
+                            "bk_cloud_id": src_cluster.bk_cloud_id,
+                            "port": src_slave_spiders[0].port,
+                            "del_ips": src_slave_spiders_ips,
+                        },
+                    )
+                )
+            if len(dst_slave_spiders) > 0:
+                domain_add_list.append(
+                    BuildDNSManageSubflow(
+                        root_id,
+                        ticket_data,
+                        DnsOpType.CREATE,
+                        {
+                            "bk_cloud_id": dst_cluster.bk_cloud_id,
+                            "port": dst_slave_spiders[0].port,
+                            "add_ips": dst_slave_spiders_ips,
+                            "entry": src_slave_entrys[0].entry,
+                        },
+                    )
+                )
+        elif len(src_slave_entrys) > 1:
+            raise Exception(_("源端查询到多个 spider slave 域名"))
+
+        if len(dst_slave_entrys) == 1:
+            if len(dst_slave_spiders) > 0:
+                domain_del_list.append(
+                    BuildDNSManageSubflow(
+                        root_id,
+                        ticket_data,
+                        DnsOpType.RECYCLE_RECORD,
+                        {
+                            "bk_cloud_id": dst_cluster.bk_cloud_id,
+                            "port": dst_slave_spiders[0].port,
+                            "del_ips": dst_slave_spiders_ips,
+                        },
+                    )
+                )
+            if len(src_slave_spiders) > 0:
+                domain_add_list.append(
+                    BuildDNSManageSubflow(
+                        root_id,
+                        ticket_data,
+                        DnsOpType.CREATE,
+                        {
+                            "bk_cloud_id": src_cluster.bk_cloud_id,
+                            "port": src_slave_spiders[0].port,
+                            "add_ips": src_slave_spiders_ips,
+                            "entry": dst_slave_entrys[0].entry,
+                        },
+                    )
+                )
+        elif len(dst_slave_entrys) > 1:
+            raise Exception(_("目标端查询到多个 spider slave 域名"))
+
+        exchange_sub_pipeline.add_parallel_acts(acts_list=domain_del_list)
+        exchange_sub_pipeline.add_parallel_acts(acts_list=domain_add_list)
+    elif src_cluster.cluster_type == ClusterType.TenDBHA.value:
+        src_master_entry = src_cluster.clusterentry_set.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.MASTER_ENTRY.value
+        )
+        dst_master_entry = dst_cluster.clusterentry_set.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.SLAVE_ENTRY.value
+        )
+        src_master_proxys = src_cluster.proxyinstance_set.filter()
+        dst_master_proxys = dst_cluster.proxyinstance_set.filter()
+        src_master_proxy_ips = [proxy.machine.ip for proxy in src_master_proxys]
+        dst_master_proxy_ips = [proxy.machine.ip for proxy in dst_master_proxys]
+
+        src_is_standby_slave = src_cluster.storageinstance_set.get(
+            instance_inner_role=InstanceInnerRole.SLAVE.value, is_stand_by=True
+        )
+        dst_is_standby_slave = dst_cluster.storageinstance_set.get(
+            instance_inner_role=InstanceInnerRole.SLAVE.value, is_stand_by=True
+        )
+        src_is_standby_entry = src_is_standby_slave.bind_entry.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.SLAVE_ENTRY.value
+        )
+        dst_is_standby_entry = dst_is_standby_slave.bind_entry.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.SLAVE_ENTRY.value
+        )
+        domain_del_list = [
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_master_proxys[0].port,
+                    "del_ips": src_master_proxy_ips,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_master_proxys[0].port,
+                    "del_ips": dst_master_proxy_ips,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_is_standby_slave.port,
+                    "del_ips": src_is_standby_slave.machine.ip,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_is_standby_slave.port,
+                    "del_ips": dst_is_standby_slave.machine.ip,
+                },
+            ),
+        ]
+        domain_add_list = [
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_master_proxys[0].port,
+                    "add_ips": src_master_proxy_ips,
+                    "entry": dst_master_entry.entry,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_master_entry[0].port,
+                    "add_ips": dst_master_proxy_ips,
+                    "entry": src_master_entry.entry,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_is_standby_slave.port,
+                    "add_ips": src_is_standby_slave.machine.ip,
+                    "entry": dst_is_standby_entry.entry,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_is_standby_slave.port,
+                    "add_ips": dst_is_standby_slave.machine.ip,
+                    "entry": src_is_standby_entry.entry,
+                },
+            ),
+        ]
+
+        exchange_sub_pipeline.add_parallel_acts(acts_list=domain_del_list)
+        exchange_sub_pipeline.add_parallel_acts(acts_list=domain_add_list)
+    elif src_cluster.cluster_type == ClusterType.TenDBSingle.value:
+        src_master = src_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.ORPHAN.value)
+        dst_master = dst_cluster.storageinstance_set.get(instance_inner_role=InstanceInnerRole.ORPHAN.value)
+        src_master_entry = src_master.bind_entry.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.MASTER_ENTRY.value
+        )
+        dst_master_entry = dst_master.bind_entry.get(
+            cluster_entry_type=ClusterEntryType.DNS.value, role=ClusterEntryRole.MASTER_ENTRY.value
+        )
+        domain_del_list = [
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {"bk_cloud_id": src_cluster.bk_cloud_id, "port": src_master.port, "del_ips": src_master.machine.ip},
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.RECYCLE_RECORD,
+                {"bk_cloud_id": dst_cluster.bk_cloud_id, "port": dst_master.port, "del_ips": dst_master.machine.ip},
+            ),
+        ]
+        domain_add_list = [
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": src_cluster.bk_cloud_id,
+                    "port": src_master.port,
+                    "add_ips": src_master.machine.ip,
+                    "entry": dst_master_entry.entry,
+                },
+            ),
+            BuildDNSManageSubflow(
+                root_id,
+                ticket_data,
+                DnsOpType.CREATE,
+                {
+                    "bk_cloud_id": dst_cluster.bk_cloud_id,
+                    "port": dst_master.port,
+                    "add_ips": dst_master.machine.ip,
+                    "entry": src_master_entry.entry,
+                },
+            ),
+        ]
+        exchange_sub_pipeline.add_parallel_acts(acts_list=domain_del_list)
+        exchange_sub_pipeline.add_parallel_acts(acts_list=domain_add_list)
+    else:
+        raise Exception(_("域名互换不支持该集群类型"))
     return exchange_sub_pipeline.build_sub_process(sub_name=_("域名互换"))
 
 
@@ -177,5 +444,5 @@ def rollback_clb_exchange_subflow(root_id: str, ticket_data: dict, src_cluster: 
             act_name=_("删除clb master proxy"), act_component_code=MySQLClbOperationComponent.code, kwargs=kwargs_del
         )
 
-    #  todo 互换完毕修改元数据
+    #  todo 互换完毕修改元数据 db_meta_clusterentry
     return exchange_sub_pipeline.build_sub_process(sub_name=_("CLB域名互换"))

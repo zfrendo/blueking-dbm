@@ -19,7 +19,10 @@ from backend.db_meta.enums import InstanceInnerRole
 from backend.db_meta.models import Cluster
 from backend.flow.engine.bamboo.scene.common.builder import Builder, SubBuilder
 from backend.flow.engine.bamboo.scene.mysql.clone_grants_from_file import mysql_clone_grants_from_file_subflow
-from backend.flow.engine.bamboo.scene.mysql.common.rollback_domain_exchange import rollback_clb_exchange_subflow
+from backend.flow.engine.bamboo.scene.mysql.common.rollback_domain_exchange import (
+    rollback_clb_exchange_subflow,
+    rollback_domain_exchange_subflow,
+)
 from backend.flow.plugins.components.collections.mysql.clone_proxy_client_in_backend import (
     CloneProxyUsersInBackendComponent,
 )
@@ -179,8 +182,15 @@ class MysqlRollbackSwitchFlow(object):
                     }
                 )
 
-            #  步骤3 域名互切、包括clb域名、proxy 域名。从库域名
+            #  步骤3 集群互换域名
+            rollback_domain_exchange_subflow(
+                root_id=self.root_id,
+                ticket_data=copy.deepcopy(ticket_data),
+                src_cluster=src_cluster,
+                dst_cluster=dst_cluster,
+            )
 
+            #  步骤3 域名互切、包括clb域名、proxy 域名。从库域名
             exchange_clb_subflow = rollback_clb_exchange_subflow(
                 root_id=self.root_id,
                 ticket_data=copy.deepcopy(ticket_data),
